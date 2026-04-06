@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+venv/
+.venv/
+env/
+.env/
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large files / Models
+*.pt
+*.pth
+*.weights
+
+# Multimedia
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Databases
+*.db
+*.sqlite3
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project specific
+out.txt
+processes.json
+energy_data.db
+yolov8n.pt
+yolov8s.pt
+video.mp4
+video2.mp4
