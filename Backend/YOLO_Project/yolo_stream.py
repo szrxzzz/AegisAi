@@ -48,7 +48,7 @@ def generate_frames(room_name: str = "Room1"):
     q_counts: dict[str, int] = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
 
     x_ratio = 0.5
-    y_ratio = 0.4
+    y_ratio = 0.35
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
