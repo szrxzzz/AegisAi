@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   LayoutGrid, Video, BarChart3, Settings, 
-  Shield, Zap, Cpu, Clock, Activity, Download 
+  Shield, Zap, Cpu, Clock, Activity, Download, Lightbulb, Fan 
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, 
@@ -149,10 +149,13 @@ function DashboardView() {
 // --- 2. LIVE ROOMS VIEW ---
 function LiveRoomsView() {
   const [activeQs, setActiveQs] = useState({ Q1: 0, Q2: 0, Q3: 0, Q4: 0 });
+  const [deviceStates, setDeviceStates] = useState({});
   const [selectedFile, setSelectedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [streamActive, setStreamActive] = useState(false);
   const [streamKey, setStreamKey] = useState(null);
+  const [streamError, setStreamError] = useState(false);
+  const [streamLoaded, setStreamLoaded] = useState(false);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -165,6 +168,13 @@ function LiveRoomsView() {
             }
         })
         .catch(err => console.error(err));
+      
+      fetch('http://localhost:8000/device_status')
+        .then(res => res.json())
+        .then(data => {
+            setDeviceStates(data);
+        })
+        .catch(err => console.error(err));
     }, 1000);
     return () => clearInterval(interval);
   }, []);
@@ -172,31 +182,35 @@ function LiveRoomsView() {
   const handleFileSelect = (e) => {
     const file = e.target.files[0];
     if (file) setSelectedFile(file);
-    // Reset so the same file can be re-selected later
     e.target.value = '';
   };
 
   const handleStart = async () => {
     if (!selectedFile) return;
     setIsUploading(true);
+    setStreamError(false);
+    setStreamLoaded(false);
     const formData = new FormData();
     formData.append("file", selectedFile);
     try {
-      await fetch('http://localhost:8000/upload_video/', { method: 'POST', body: formData });
+      const res = await fetch('http://localhost:8000/upload_video/', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error('Upload failed');
       setStreamKey(Date.now());
       setStreamActive(true);
     } catch (err) {
-      console.error(err);
+      console.error('Upload error:', err);
+      setStreamError(true);
     } finally {
       setIsUploading(false);
     }
   };
 
   const handleStreamEnd = () => {
-    // Called when MJPEG stream closes (video finished)
     setStreamActive(false);
     setStreamKey(null);
     setSelectedFile(null);
+    setStreamError(false);
+    setStreamLoaded(false);
     setActiveQs({ Q1: 0, Q2: 0, Q3: 0, Q4: 0 });
   };
 
@@ -204,6 +218,16 @@ function LiveRoomsView() {
       const actives = Object.keys(activeQs).filter(k => activeQs[k] === 1);
       if (actives.length === 0) return "No Detections";
       return actives.join(', ') + " Active";
+  };
+
+  const handleManualControl = async (quadrant, device, status) => {
+    try {
+      await fetch(`http://localhost:8000/manual_control?quadrant=${quadrant}&device=${device}&status=${status}`, {
+        method: 'POST'
+      });
+    } catch (err) {
+      console.error('Failed to update manual control:', err);
+    }
   };
 
   return (
@@ -237,30 +261,50 @@ function LiveRoomsView() {
           )}
         </div>
       </div>
+      
       <div className="grid grid-cols-3 gap-6">
-        <div className="col-span-2 bg-[#111827] border border-slate-800 rounded-2xl overflow-hidden">
-          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
-            <div className="flex items-center gap-2"><Video size={16} className="text-emerald-500"/> <span className="font-bold text-sm">Room 1</span></div>
-            <div className={`text-[10px] px-2 py-1 rounded font-bold uppercase tracking-widest ${streamActive ? 'bg-emerald-500/20 text-emerald-500' : 'bg-slate-700/40 text-slate-500'}`}>
-              {streamActive ? 'Live Feed Active' : 'Idle — Select a Video'}
+        {/* Left: Video Feed + Table */}
+        <div className="col-span-2 space-y-6">
+          <div className="bg-[#111827] border border-slate-800 rounded-2xl overflow-hidden">
+            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+              <div className="flex items-center gap-2"><Video size={16} className="text-emerald-500"/> <span className="font-bold text-sm">Room 1</span></div>
+              <div className={`text-[10px] px-2 py-1 rounded font-bold uppercase tracking-widest ${streamActive ? 'bg-emerald-500/20 text-emerald-500' : 'bg-slate-700/40 text-slate-500'}`}>
+                {streamActive ? 'Live Feed Active' : 'Idle — Select a Video'}
+              </div>
+            </div>
+            <div className="aspect-video bg-black/40 relative flex items-center justify-center overflow-hidden">
+              {streamActive && streamKey ? (
+                <div className="relative w-full h-full bg-black">
+                  <img
+                    key={streamKey}
+                    src={`http://localhost:8000/video_feed?room=Room1&t=${streamKey}`}
+                    className="w-full h-full object-contain"
+                    alt=""
+                    onLoad={() => setStreamLoaded(true)}
+                  />
+                  {!streamLoaded && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80">
+                      <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+                      <span className="text-xs text-slate-400 font-bold">Loading YOLO model...</span>
+                    </div>
+                  )}
+                </div>
+              ) : streamError ? (
+                <div className="flex flex-col items-center gap-3 text-red-500">
+                  <Video size={48} />
+                  <span className="text-sm font-bold">Upload failed — try again</span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-3 text-slate-600">
+                  <Video size={48} />
+                  <span className="text-sm font-bold">Select a video and click Start</span>
+                </div>
+              )}
             </div>
           </div>
-          <div className="aspect-video bg-black/40 relative flex items-center justify-center border-b border-slate-800 overflow-hidden">
-            {streamActive && streamKey ? (
-              <img
-                src={"http://localhost:8000/video_feed?t=" + streamKey}
-                className="w-full h-full object-contain"
-                alt="Live YOLO Stream"
-                onError={handleStreamEnd}
-              />
-            ) : (
-              <div className="flex flex-col items-center gap-3 text-slate-600">
-                <Video size={48} />
-                <span className="text-sm font-bold">Select a video and click Start</span>
-              </div>
-            )}
-          </div>
-          <div className="p-6">
+
+          {/* Localized Fan & Light Status Table */}
+          <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6">
             <h3 className="text-xs font-bold text-slate-500 uppercase mb-4">Localized Fan &amp; Light Status</h3>
             <table className="w-full text-xs text-left">
                 <thead>
@@ -284,20 +328,40 @@ function LiveRoomsView() {
             </table>
           </div>
         </div>
-        <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-6 tracking-widest">Quadrant Map</h3>
-          <div className="grid grid-cols-2 gap-3 aspect-square mb-6">
-            {['Q2', 'Q1', 'Q4', 'Q3'].map(q => (
-              <div key={q} className={"border-2 rounded-xl flex flex-col items-center justify-center transition-all " + (activeQs[q] === 1 ? 'border-emerald-500 bg-emerald-500/10 shadow-[0_0_20px_rgba(16,185,129,0.2)]' : 'border-slate-800')}>
-                <span className="text-xl font-bold">{q}</span>
-                {activeQs[q] === 1 && <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full mt-1 animate-pulse" />}
-              </div>
-            ))}
+
+        {/* Right: Manual Device Controls */}
+        <div className="space-y-6">
+          <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-6 tracking-widest">Manual Device Controls</h3>
+            <div className="space-y-6">
+              {['Q1', 'Q2', 'Q3', 'Q4'].map(q => (
+                <ManualControlPanel 
+                  key={q} 
+                  quadrant={q} 
+                  deviceState={deviceStates[q]} 
+                  onControl={handleManualControl}
+                />
+              ))}
+            </div>
           </div>
-          <div className="p-4 bg-slate-900/50 rounded-xl border border-slate-800">
-             <p className="text-[10px] text-slate-500 uppercase font-bold mb-1">Current Detection</p>
-             <p className="text-emerald-400 font-bold">{getActiveText()}</p>
+
+          <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6">
+            <h3 className="text-[10px] font-bold text-slate-500 uppercase mb-4 tracking-widest">Current Detection</h3>
+            <p className="text-emerald-400 font-bold text-lg">{getActiveText()}</p>
           </div>
+        </div>
+      </div>
+
+      {/* Quadrant Device Status Monitoring Section */}
+      <div className="bg-[#111827] border border-slate-800 rounded-2xl p-6">
+        <div className="mb-2">
+          <h2 className="text-lg font-bold text-white">Quadrant Device Status Monitoring</h2>
+          <p className="text-xs text-slate-500">AI-Detection (Auto) vs. Smart-Switch (Manual)</p>
+        </div>
+        <div className="grid grid-cols-4 gap-4 mt-6">
+          {['Q1', 'Q2', 'Q3', 'Q4'].map(q => (
+            <QuadrantDeviceCard key={q} quadrant={q} deviceState={deviceStates[q]} />
+          ))}
         </div>
       </div>
     </div>
@@ -541,4 +605,164 @@ function Toggle({ label, active = false }) {
             </div>
         </div>
     )
+}
+
+// --- GLOWING STATUS BADGE ---
+function StatusBadge({ on, type = 'auto' }) {
+  if (on) {
+    const glowStyles = {
+      auto:   'bg-violet-500/20 text-violet-300 border border-violet-500/60 shadow-[0_0_10px_rgba(167,139,250,0.5)]',
+      manual: 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/60 shadow-[0_0_10px_rgba(34,211,238,0.5)]',
+    };
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-widest uppercase ${glowStyles[type]}`}>
+        <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${type === 'auto' ? 'bg-violet-400' : 'bg-cyan-400'}`} />
+        ON
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-widest uppercase bg-slate-800/80 text-slate-600 border border-slate-700/50">
+      <span className="w-1.5 h-1.5 rounded-full bg-slate-700" />
+      OFF
+    </span>
+  );
+}
+
+// --- QUADRANT DEVICE STATUS CARD ---
+function QuadrantDeviceCard({ quadrant, deviceState }) {
+  const light = deviceState?.light || { auto: false, manual: null, final: false };
+  const fan = deviceState?.fan || { auto: false, manual: null, final: false };
+
+  const cardActive = light.final || fan.final;
+
+  return (
+    <div className={`border rounded-xl p-5 transition-all duration-300 ${
+      cardActive
+        ? 'bg-slate-900/80 border-slate-600/60 shadow-[0_0_24px_rgba(99,102,241,0.08)]'
+        : 'bg-slate-900/40 border-slate-800/60'
+    }`}>
+      <div className="flex items-center justify-between mb-5">
+        <h3 className="text-sm font-bold text-white tracking-wide">{quadrant}</h3>
+        <span className="text-[9px] px-2 py-0.5 rounded font-bold bg-slate-800 text-slate-500 tracking-widest border border-slate-700/50">ZONE NODE</span>
+      </div>
+
+      {/* Light */}
+      <div className="mb-4 pb-4 border-b border-slate-800/40">
+        <div className="flex items-center gap-2 mb-3">
+          <Lightbulb size={14} className={light.final ? 'text-yellow-300 drop-shadow-[0_0_6px_rgba(253,224,71,0.8)]' : 'text-slate-600'} />
+          <span className="text-[11px] font-bold text-slate-300 tracking-widest uppercase">Light</span>
+        </div>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Auto Status</span>
+            <StatusBadge on={light.auto} type="auto" />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Manual Switch</span>
+            <StatusBadge on={light.manual === true} type="manual" />
+          </div>
+        </div>
+      </div>
+
+      {/* Fan */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <Fan size={14} className={fan.final ? 'text-cyan-300 drop-shadow-[0_0_6px_rgba(34,211,238,0.8)]' : 'text-slate-600'} />
+          <span className="text-[11px] font-bold text-slate-300 tracking-widest uppercase">Fan</span>
+        </div>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Auto Status</span>
+            <StatusBadge on={fan.auto} type="auto" />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Manual Switch</span>
+            <StatusBadge on={fan.manual === true} type="manual" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- MANUAL CONTROL PANEL (Sidebar) ---
+function ManualControlPanel({ quadrant, deviceState, onControl }) {
+  if (!deviceState) {
+    return (
+      <div className="border-b border-slate-800/50 pb-6 last:border-b-0 last:pb-0">
+        <h4 className="text-sm font-bold text-white mb-4">{quadrant} CONTROLS</h4>
+        
+        {/* Light Toggle */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-slate-400 uppercase font-bold">Light</span>
+            <ToggleSwitch 
+              active={false} 
+              onChange={(val) => onControl(quadrant, 'light', val ? true : false)}
+            />
+          </div>
+        </div>
+        
+        {/* Fan Toggle */}
+        <div>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400 uppercase font-bold">Fan</span>
+            <ToggleSwitch 
+              active={false} 
+              onChange={(val) => onControl(quadrant, 'fan', val ? true : false)}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { light, fan } = deviceState;
+
+  return (
+    <div className="border-b border-slate-800/50 pb-6 last:border-b-0 last:pb-0">
+      <h4 className="text-sm font-bold text-white mb-4">{quadrant} CONTROLS</h4>
+      
+      {/* Light Toggle */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-slate-400 uppercase font-bold">Light</span>
+          <ToggleSwitch 
+            active={light?.manual === true} 
+            onChange={(val) => onControl(quadrant, 'light', val ? true : false)}
+          />
+        </div>
+      </div>
+      
+      {/* Fan Toggle */}
+      <div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400 uppercase font-bold">Fan</span>
+          <ToggleSwitch 
+            active={fan?.manual === true} 
+            onChange={(val) => onControl(quadrant, 'fan', val ? true : false)}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- TOGGLE SWITCH COMPONENT ---
+function ToggleSwitch({ active, onChange }) {
+  return (
+    <button
+      onClick={() => onChange(!active)}
+      className={`w-12 h-6 rounded-full relative transition-all duration-300 ease-in-out ${
+        active ? 'bg-emerald-500 shadow-lg shadow-emerald-500/30' : 'bg-slate-700'
+      }`}
+    >
+      <div
+        className={`w-5 h-5 bg-white rounded-full absolute top-0.5 left-0.5 transition-transform duration-300 ease-in-out shadow-md ${
+          active ? 'translate-x-6' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  );
 }

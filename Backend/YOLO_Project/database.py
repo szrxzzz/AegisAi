@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime # type: ignore
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean # type: ignore
 from sqlalchemy.orm import sessionmaker, declarative_base # type: ignore
 from datetime import datetime
 
@@ -18,7 +18,11 @@ class EnergyLogDB(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     room = Column(String, index=True)
     quadrant = Column(String, index=True)
+    device = Column(String, nullable=True)  # "light" or "fan"
     event = Column(String)  # "ON" or "OFF"
+    auto_state = Column(Integer, nullable=True)  # Auto state from YOLO (0 or 1)
+    manual_override = Column(Integer, nullable=True)  # Manual override state (0, 1, or None)
+    final_state = Column(Integer, nullable=True)  # Final actual state (0 or 1)
     duration_s = Column(Float, nullable=True) # None for "ON" events
     energy_kwh = Column(Float, nullable=True) # None for "ON" events
 
