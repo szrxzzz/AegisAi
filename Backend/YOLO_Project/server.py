@@ -6,8 +6,6 @@ from pydantic import BaseModel  # type: ignore
 from datetime import datetime
 from database import SessionLocal, EnergyLogDB, engine, Base # type: ignore
 from yolo_stream import generate_frames, set_video_path, get_active_quadrants, get_device_states, set_manual_device_status  # type: ignore
-from mqtt_manager import mqtt_manager  # type: ignore
-from state_manager import StateManager  # type: ignore
 import uvicorn  # type: ignore
 import shutil
 import os
@@ -37,49 +35,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize MQTT connection
-@app.on_event("startup")
-async def startup_event():
-    """Initialize MQTT connection on startup"""
-    print("🚀 Starting AegisAI Backend Server...")
-    
-    # Import state_manager from yolo_stream
-    from yolo_stream import state_manager
-    
-    # Set MQTT manager in state manager
-    state_manager.set_mqtt_manager(mqtt_manager)
-    
-    # Set up MQTT callbacks
-    def handle_manual_override(data):
-        """Handle manual override from ESP32"""
-        state_manager.handle_esp32_manual_override(data)
-        
-        # Log state changes
-        db = SessionLocal()
-        try:
-            state_manager.log_state_changes(db, "Room1")
-        finally:
-            db.close()
-    
-    def handle_esp32_feedback(data):
-        """Handle feedback from ESP32"""
-        print(f"📡 ESP32 Feedback: {data}")
-    
-    mqtt_manager.set_manual_override_callback(handle_manual_override)
-    mqtt_manager.set_esp32_feedback_callback(handle_esp32_feedback)
-    
-    # Connect to MQTT broker
-    mqtt_manager.connect()
-    
-    print("✅ AegisAI Backend Server started successfully!")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    print("🔌 Shutting down AegisAI Backend Server...")
-    mqtt_manager.disconnect()
-    print("✅ Shutdown complete!")
 
 # Dependency to get DB session
 def get_db():

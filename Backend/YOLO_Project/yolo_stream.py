@@ -2,26 +2,70 @@ import cv2 # type: ignore
 import torch # type: ignore
 import time
 import os
+import json
 from datetime import datetime
 from ultralytics import YOLO # type: ignore
 from database import SessionLocal, EnergyLogDB # type: ignore
 from state_manager import StateManager # type: ignore
+import paho.mqtt.client as mqtt # type: ignore
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 video_path = os.path.join(_HERE, "video.mp4")
 state_manager = StateManager()
 
+# Global state
+active_quadrants: dict = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+q_override_state: dict = {"Q1": None, "Q2": None, "Q3": None, "Q4": None}
+
+# MQTT — matches ESP32 config
+MQTT_BROKER = "broker.emqx.io"
+MQTT_PORT = 1883
+MQTT_TOPIC = "aegis_ai_v8/quadrant_status"
+MQTT_OVERRIDE_TOPIC = "aegis_ai_v8/q4_override"
+
+def _on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print(f"[MQTT] Connected to {MQTT_BROKER}")
+        client.subscribe(MQTT_OVERRIDE_TOPIC)
+    else:
+        print(f"[MQTT] Connection failed rc={rc}")
+
+def _on_message(client, userdata, msg):
+    """Handle Q4 override button press from ESP32"""
+    if msg.topic == MQTT_OVERRIDE_TOPIC:
+        payload = msg.payload.decode().strip()
+        if payload == "TOGGLE":
+            current = q_override_state.get("Q4")
+            q_override_state["Q4"] = 0 if current == 1 else 1
+            print(f"[MQTT] Q4 override toggled -> {q_override_state['Q4']}")
+
+mqtt_client = mqtt.Client(client_id="aegis-backend", clean_session=True)
+mqtt_client.on_connect = _on_connect
+mqtt_client.on_message = _on_message
+try:
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    mqtt_client.loop_start()
+except Exception as e:
+    print(f"[MQTT] Could not connect: {e}")
+
 def set_video_path(path: str):
     global video_path
     video_path = path
 
 def get_active_quadrants():
-    """Get current occupancy status of all quadrants (legacy compatibility)"""
+    """Get current occupancy status of all quadrants"""
     result = {}
     for quadrant in ["Q1", "Q2", "Q3", "Q4"]:
-        # A quadrant is active if auto status says it should be occupied
-        result[quadrant] = 1 if state_manager.auto_status[quadrant]["light"] else 0
+        manual = state_manager.manual_status[quadrant]
+        if manual["light"] is not None or manual["fan"] is not None:
+            # Manual override is set — use state_manager final status
+            light_on = state_manager.get_final_status(quadrant, "light")
+            fan_on = state_manager.get_final_status(quadrant, "fan")
+            result[quadrant] = 1 if (light_on or fan_on) else 0
+        else:
+            # No manual override — use live detection dict directly
+            result[quadrant] = active_quadrants.get(quadrant, 0)
     return result
 
 def get_device_states():
@@ -39,16 +83,20 @@ def set_manual_device_status(quadrant: str, device: str, status):
 
 
 def generate_frames(room_name: str = "Room1"):
+    global active_quadrants, q_override_state
+
     model = YOLO("yolov8n.pt")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
 
     db = SessionLocal()
-    prev_occupancy: dict[str, bool] = {"Q1": False, "Q2": False, "Q3": False, "Q4": False}
+    prev_q: dict[str, int] = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
     q_counts: dict[str, int] = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+    on_time: dict[str, datetime | None] = {"Q1": None, "Q2": None, "Q3": None, "Q4": None}
+    power_kw = 1.0  
 
     x_ratio = 0.5
-    y_ratio = 0.35
+    y_ratio = 0.4
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -69,17 +117,16 @@ def generate_frames(room_name: str = "Room1"):
         decoded_count: int = 0
         start_time = time.time()
 
+        try:
+            mqtt_client.publish(MQTT_TOPIC, json.dumps({"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}))
+        except Exception as e:
+            print(f"MQTT Publish error on start: {e}")
+
         while True:
-            # Skip frames — stop if video ends during skip
-            end_of_video = False
             for _ in range(PROCESS_EVERY - 1):
                 if not cap.grab():
-                    end_of_video = True
                     break
                 frame_idx += 1
-
-            if end_of_video:
-                break
 
             ret, frame = cap.read()
             if not ret:
@@ -134,18 +181,51 @@ def generate_frames(room_name: str = "Room1"):
                 else: label = "Q4"
                 cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-            # Determine occupancy with smoothing
-            smoothed_occupancy = {} 
+            smoothed_q = {} 
             for key in q_counts:
-                smoothed_occupancy[key] = q_counts[key] >= 4
+                smoothed_q[key] = 1 if q_counts[key] >= 4 else 0 
+                
+            # Force manual overrides if set
+            for key in ["Q1", "Q2", "Q3", "Q4"]:
+                if q_override_state[key] is not None:
+                    smoothed_q[key] = q_override_state[key]
+                    q_counts[key] = 15 if q_override_state[key] == 1 else 0
+
+            current_time = datetime.now()
             
-            # Update state manager with occupancy changes
-            for key in smoothed_occupancy:
-                if prev_occupancy[key] != smoothed_occupancy[key]:
-                    state_manager.update_auto_status(key, smoothed_occupancy[key])
-                    state_manager.log_state_changes(db, room_name)
-            
-            prev_occupancy = dict(smoothed_occupancy) 
+            for key in smoothed_q:
+                if prev_q[key] == 0 and smoothed_q[key] == 1: 
+                    on_time[key] = current_time
+                    db_log = EnergyLogDB(timestamp=current_time, room=room_name, quadrant=key, event="ON")
+                    db.add(db_log)
+                    db.commit()
+                
+                elif prev_q[key] == 1 and smoothed_q[key] == 0: 
+                    off_time = current_time
+                    t_on = on_time.get(key)
+                    if t_on is not None:
+                        duration = (off_time - t_on).total_seconds()
+                        energy = power_kw * (duration / 3600.0)
+                        db_log = EnergyLogDB(
+                            timestamp=current_time, room=room_name, quadrant=key, 
+                            event="OFF", duration_s=round(duration, 2), energy_kwh=round(energy, 6) 
+                        )
+                        db.add(db_log)
+                        db.commit()
+                    on_time[key] = None
+
+            if smoothed_q != prev_q:
+                try:
+                    mqtt_client.publish(MQTT_TOPIC, json.dumps(smoothed_q))
+                except Exception as e:
+                    print(f"MQTT Publish error: {e}")
+
+            prev_q = dict(smoothed_q) 
+            active_quadrants = dict(smoothed_q)
+
+            # Sync state_manager so /status endpoint reflects live detections
+            for key in smoothed_q:
+                state_manager.update_auto_status(key, smoothed_q[key] == 1)
 
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 65]
             ret_im, buffer = cv2.imencode('.jpg', frame, encode_params)
@@ -154,10 +234,29 @@ def generate_frames(room_name: str = "Room1"):
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         
-        # Cleanup on video end - turn off all auto statuses
-        for quadrant in ["Q1", "Q2", "Q3", "Q4"]:
-            state_manager.update_auto_status(quadrant, False)
-        state_manager.cleanup_on_shutdown(db, room_name)
+        current_time = datetime.now()
+        cleanup_q: dict[str, int] = dict(active_quadrants) 
+        for key, is_active in cleanup_q.items(): 
+            if is_active == 1:
+                off_time = current_time
+                t_on = on_time.get(key)
+                if t_on is not None:
+                    duration = (off_time - t_on).total_seconds()
+                    energy = power_kw * (duration / 3600.0)
+                    db_log = EnergyLogDB(
+                        timestamp=current_time, room=room_name, quadrant=key, 
+                        event="OFF", duration_s=round(duration, 2), energy_kwh=round(energy, 6)  
+                    )
+                    db.add(db_log)
+                    db.commit()
+        
+        active_quadrants = {"Q1": 0, "Q2": 0, "Q3": 0, "Q4": 0}
+        q_override_state = {"Q1": None, "Q2": None, "Q3": None, "Q4": None}
+        
+        try:
+            mqtt_client.publish(MQTT_TOPIC, json.dumps(active_quadrants))
+        except Exception as e:
+            print(f"MQTT Publish error on end: {e}")
             
     finally:
         db.close()
